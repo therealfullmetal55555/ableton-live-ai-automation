@@ -7,3 +7,6 @@ env/
 *.tmp
 .idea/
 .vscode/
+arrangement_plan.json
+*.als
+*.asd

@@ -1,250 +1,723 @@
 #!/usr/bin/env python3
 """
-Ableton Live 12 Autonomous AI Arrangement & DSP Automation Engine
-==================================================================
-Fully programmatic control over Ableton Live 12 Suite via TCP Socket / MCP Bridge.
-Automates:
-- Transport, BPM, loop markers, and view state
-- Audio clip placement & timeline warping
-- MIDI clip creation, note programming, and velocity dynamics
-- Live DSP device parameter manipulation (Drum Buss, Saturator, Filters, etc.)
-- Multi-track structural arrangement (Intro -> Drops -> Breakdown -> Buildup -> Outro)
+Ableton arrangement generator.
+
+Default mode:
+    Generates and validates arrangement_plan.json.
+    Does NOT connect to Ableton.
+
+Apply mode:
+    Sends the plan to the existing JSON/TCP Ableton bridge.
+    Never deletes existing clips.
+
+Expected empty MIDI tracks in the Ableton template:
+    2 Bass
+    3 Kick
+    4 Snare
+    5 Hats
+    6 Lead
+    7 Chords
+
+Track indexes are zero-based, matching the original project.
 """
 
-import os
-import sys
-import socket
+import argparse
+import codecs
 import json
-import time
+import random
+import socket
+from dataclasses import dataclass
+from pathlib import Path
 
-SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SAMPLE_PATH = os.path.join(SCRIPT_DIR, "assets", "sample_loop.wav")
+
+BPM = 150
+BEATS_PER_BAR = 4
+TOTAL_BARS = 80
+
+TRACKS = {
+    "bass": 2,
+    "kick": 3,
+    "snare": 4,
+    "hats": 5,
+    "lead": 6,
+    "chords": 7,
+}
+
+# MIDI roots: A2, F2, C2, G2.
+# One chord per bar. The progression repeats every four bars.
+PROGRESSION = [
+    (45, "minor"),
+    (41, "major"),
+    (36, "major"),
+    (43, "major"),
+]
+
+
+@dataclass(frozen=True)
+class Section:
+    name: str
+    start_bar: int
+    bars: int
+
+
+SECTIONS = [
+    Section("Intro", 0, 8),
+    Section("Verse", 8, 16),
+    Section("Breakdown", 24, 8),
+    Section("Buildup", 32, 8),
+    Section("Drop", 40, 16),
+    Section("Climax", 56, 16),
+    Section("Outro", 72, 8),
+]
+
+
+def midi_note(pitch, start, duration, velocity):
+    return {
+        "pitch": int(pitch),
+        "start_time": round(float(start), 4),
+        "duration": round(float(duration), 4),
+        "velocity": int(velocity),
+    }
+
+
+def chord_at(global_bar):
+    return PROGRESSION[global_bar % len(PROGRESSION)]
+
+
+def add_note(parts, part, pitch, start, duration, velocity):
+    parts[part].append(midi_note(pitch, start, duration, velocity))
+
+
+def add_chords(parts, section, local_bar, root, quality):
+    name = section.name
+    start = local_bar * BEATS_PER_BAR
+
+    # Piano/keys register: mostly C3-A3 for chord roots.
+    chord_root = root + 12
+    third = chord_root + (3 if quality == "minor" else 4)
+    fifth = chord_root + 7
+
+    if name == "Intro":
+        velocity = 49
+        duration = 3.55
+
+    elif name == "Breakdown":
+        velocity = 53
+        duration = 3.75
+
+    elif name == "Buildup":
+        velocity = 57 + min(local_bar, 7) * 2
+        duration = 3.55
+
+    elif name == "Climax":
+        velocity = 75
+        duration = 3.55
+
+    elif name == "Outro":
+        velocity = max(40, 61 - local_bar * 3)
+        duration = 3.55
+
+    else:
+        velocity = 64
+        duration = 3.55
+
+    # Slight strum: avoid mechanically simultaneous note starts.
+    for offset, pitch in zip((0.0, 0.025, 0.05),
+                             (chord_root, third, fifth)):
+        add_note(
+            parts,
+            "chords",
+            pitch,
+            start + offset,
+            duration - offset,
+            velocity,
+        )
+
+    # Extra upper note only in climax.
+    if name == "Climax" and local_bar % 2 == 0:
+        add_note(parts, "chords", chord_root + 12,
+                 start + 0.07, 3.40, 54)
+
+
+def add_lead(parts, section, local_bar, root, quality):
+    name = section.name
+    start = local_bar * BEATS_PER_BAR
+
+    tonic = root + 24
+    third = tonic + (3 if quality == "minor" else 4)
+    fifth = tonic + 7
+    octave = tonic + 12
+
+    # One recognizable motif with different density and endings.
+    if name == "Intro":
+        if local_bar % 2 == 0:
+            add_note(parts, "lead", fifth, start + 0.0, 0.8, 55)
+            add_note(parts, "lead", third, start + 2.5, 0.75, 51)
+
+    elif name == "Verse":
+        if local_bar % 2 == 0:
+            add_note(parts, "lead", fifth, start + 0.0, 0.65, 82)
+            add_note(parts, "lead", third, start + 1.5, 0.40, 73)
+            add_note(parts, "lead", tonic, start + 2.5, 0.80, 78)
+        else:
+            add_note(parts, "lead", third, start + 1.0, 0.45, 65)
+            add_note(parts, "lead", tonic, start + 3.0, 0.65, 69)
+
+    elif name == "Breakdown":
+        if local_bar % 2 == 0:
+            add_note(parts, "lead", fifth, start + 1.0, 1.75, 56)
+
+    elif name == "Buildup":
+        add_note(parts, "lead", tonic, start + 0.0, 0.70, 65)
+        add_note(parts, "lead", third, start + 2.0, 0.60, 70)
+
+        if local_bar >= 4:
+            add_note(parts, "lead", fifth, start + 3.0, 0.40, 76)
+
+    elif name in ("Drop", "Climax"):
+        gain = 5 if name == "Climax" else 0
+
+        add_note(parts, "lead", fifth, start + 0.0, 0.70, 87 + gain)
+        add_note(parts, "lead", third, start + 1.5, 0.40, 77 + gain)
+        add_note(parts, "lead", tonic, start + 2.5, 0.45, 82 + gain)
+
+        ending = octave if local_bar % 4 == 3 else third
+        add_note(parts, "lead", ending, start + 3.25, 0.45, 78 + gain)
+
+        # Answering note, only in the climax.
+        if name == "Climax" and local_bar % 2 == 1:
+            add_note(parts, "lead", fifth, start + 2.0, 0.30, 67)
+
+    elif name == "Outro":
+        if local_bar % 2 == 0:
+            add_note(parts, "lead", tonic, start + 0.0, 1.8,
+                     max(42, 57 - local_bar * 2))
+
+
+def add_drums_and_bass(parts, section, local_bar, root, rng):
+    name = section.name
+
+    if name in ("Intro", "Breakdown", "Outro"):
+        return
+
+    start = local_bar * BEATS_PER_BAR
+    last_bar = local_bar == section.bars - 1
+
+    if name == "Verse":
+        kick_beats = [0.0, 2.75] if local_bar % 2 == 0 else [0.0, 2.5]
+
+    elif name == "Buildup":
+        kick_beats = [0.0] if local_bar < 4 else [0.0, 2.5]
+
+    else:
+        kick_beats = [0.0, 2.5]
+
+        if name == "Climax" and local_bar % 4 == 3:
+            kick_beats.append(3.5)
+
+    for beat in kick_beats:
+        add_note(parts, "kick", 36, start + beat, 0.20, 112)
+
+    if name != "Buildup":
+        add_note(parts, "snare", 38, start + 2.0, 0.20, 105)
+
+    elif local_bar < 6:
+        add_note(parts, "snare", 38, start + 2.0, 0.20, 83)
+
+    if name != "Buildup":
+        add_note(parts, "bass", root, start + 0.0, 1.5, 101)
+
+        if name == "Verse":
+            if local_bar % 2 == 0:
+                add_note(parts, "bass", root,
+                         start + 2.75, 0.60, 91)
+
+        else:
+            add_note(parts, "bass", root,
+                     start + 2.5, 0.75, 98)
+
+            if local_bar % 4 == 3:
+                add_note(parts, "bass", root + 12,
+                         start + 3.5, 0.30, 73)
+
+    # Verse is sparse; drops have eighth-note hats.
+    hat_step = 1.0 if name == "Verse" else 0.5
+
+    for step in range(int(BEATS_PER_BAR / hat_step)):
+        beat = step * hat_step
+
+        if name == "Verse" and local_bar % 4 == 2 and beat == 3.0:
+            continue
+
+        velocity = 72
+        velocity += 8 if step % 2 == 0 else -7
+        velocity += rng.randint(-4, 4)
+
+        if name == "Buildup":
+            velocity += min(local_bar * 2, 14)
+
+        add_note(
+            parts,
+            "hats",
+            42,
+            start + beat,
+            0.14,
+            max(45, min(105, velocity)),
+        )
+
+    # Only section endings get prominent fills.
+    if last_bar and name in ("Verse", "Buildup", "Drop", "Climax"):
+        if name == "Buildup":
+            for index in range(8):
+                add_note(
+                    parts,
+                    "snare",
+                    38,
+                    start + 3.0 + index * 0.125,
+                    0.08,
+                    min(117, 70 + index * 6),
+                )
+
+        else:
+            for index, beat in enumerate((3.0, 3.25, 3.5, 3.75)):
+                add_note(
+                    parts,
+                    "snare",
+                    38,
+                    start + beat,
+                    0.13,
+                    69 + index * 9,
+                )
+
+
+def validate_sections():
+    expected_start = 0
+
+    for section in SECTIONS:
+        if section.start_bar != expected_start:
+            raise ValueError(
+                f"Gap or overlap before section {section.name}"
+            )
+
+        if section.bars <= 0:
+            raise ValueError(
+                f"Invalid length for section {section.name}"
+            )
+
+        expected_start += section.bars
+
+    if expected_start != TOTAL_BARS:
+        raise ValueError(
+            f"Expected {TOTAL_BARS} bars, got {expected_start}"
+        )
+
+
+def validate_clip(clip):
+    length = clip["length"]
+
+    if length <= 0 or clip["position"] < 0:
+        raise ValueError(f"Invalid clip position/length: {clip['name']}")
+
+    for item in clip["notes"]:
+        if not 0 <= item["pitch"] <= 127:
+            raise ValueError(f"Invalid MIDI pitch: {item}")
+
+        if not 1 <= item["velocity"] <= 127:
+            raise ValueError(f"Invalid MIDI velocity: {item}")
+
+        if item["start_time"] < 0 or item["duration"] <= 0:
+            raise ValueError(f"Invalid MIDI timing: {item}")
+
+        if item["start_time"] + item["duration"] > length + 0.0001:
+            raise ValueError(
+                f"Note extends past clip '{clip['name']}': {item}"
+            )
+
+
+def build_plan(seed):
+    validate_sections()
+    rng = random.Random(seed)
+    clips = []
+
+    for section in SECTIONS:
+        parts = {name: [] for name in TRACKS}
+
+        for local_bar in range(section.bars):
+            global_bar = section.start_bar + local_bar
+            root, quality = chord_at(global_bar)
+
+            add_chords(parts, section, local_bar, root, quality)
+            add_lead(parts, section, local_bar, root, quality)
+
+            add_drums_and_bass(
+                parts,
+                section,
+                local_bar,
+                root,
+                rng,
+            )
+
+        for part_name, notes in parts.items():
+            if not notes:
+                continue
+
+            clip = {
+                "track_index": TRACKS[part_name],
+                "position": section.start_bar * BEATS_PER_BAR,
+                "length": section.bars * BEATS_PER_BAR,
+                "name": f"GEN | {section.name} | {part_name}",
+                "notes": sorted(
+                    notes,
+                    key=lambda item: (
+                        item["start_time"],
+                        item["pitch"],
+                    ),
+                ),
+            }
+
+            validate_clip(clip)
+            clips.append(clip)
+
+    return {
+        "format_version": 1,
+        "bpm": BPM,
+        "bars": TOTAL_BARS,
+        "seed": seed,
+        "tracks": TRACKS,
+        "sections": [
+            {
+                "name": section.name,
+                "start_bar": section.start_bar,
+                "bars": section.bars,
+            }
+            for section in SECTIONS
+        ],
+        "clips": clips,
+    }
+
 
 class AbletonClient:
     """
-    High-performance persistent TCP client connecting to Ableton Live's MCP Python Remote Script.
-    Communicates via JSON protocol on localhost:9877.
+    Client for the JSON-over-TCP bridge used by the original project.
+
+    No automatic retries: repeating create_arrangement_clip after an
+    uncertain timeout could create duplicate clips.
     """
-    def __init__(self, host='localhost', port=9877):
-        self.host = host
-        self.port = port
-        self.sock = None
-        self.connect()
 
-    def connect(self):
-        if self.sock:
-            try:
-                self.sock.close()
-            except Exception:
-                pass
-        self.sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
-        self.sock.connect((self.host, self.port))
-        self.sock.settimeout(10.0)
+    def __init__(self, host="127.0.0.1", port=9877):
+        self.sock = socket.create_connection((host, port), timeout=10)
+        self.sock.settimeout(15)
+        self.text_decoder = codecs.getincrementaldecoder("utf-8")()
+        self.buffer = ""
 
-    def send(self, cmd_type, params=None):
-        cmd = json.dumps({'type': cmd_type, 'params': params or {}})
-        try:
-            self.sock.sendall(cmd.encode('utf-8'))
-        except (socket.error, BrokenPipeError):
-            self.connect()
-            self.sock.sendall(cmd.encode('utf-8'))
+    def send(self, command, params=None):
+        request = json.dumps({
+            "type": command,
+            "params": params or {},
+        })
 
-        buf = ''
+        # Keep the original project's request format: raw JSON over TCP.
+        self.sock.sendall(request.encode("utf-8"))
+
+        decoder = json.JSONDecoder()
+
         while True:
+            stripped = self.buffer.lstrip()
+
+            if stripped:
+                try:
+                    response, end = decoder.raw_decode(stripped)
+                    self.buffer = stripped[end:]
+                    break
+
+                except json.JSONDecodeError:
+                    pass
+
             chunk = self.sock.recv(16384)
+
             if not chunk:
-                raise ConnectionError("Socket closed by Ableton Live bridge")
-            buf += chunk.decode('utf-8')
-            try:
-                return json.loads(buf)
-            except json.JSONDecodeError:
-                continue
+                raise ConnectionError(
+                    f"Bridge closed connection during '{command}'"
+                )
+
+            self.buffer += self.text_decoder.decode(chunk)
+
+            if len(self.buffer) > 4_000_000:
+                raise RuntimeError(
+                    "Bridge response is unexpectedly large"
+                )
+
+        if not isinstance(response, dict):
+            raise RuntimeError(
+                f"Unexpected response to '{command}': {response!r}"
+            )
+
+        if response.get("success") is False or response.get("error"):
+            raise RuntimeError(
+                f"Bridge rejected '{command}': {response!r}"
+            )
+
+        return response
 
     def close(self):
-        if self.sock:
-            self.sock.close()
+        self.sock.close()
 
 
-def run_arrangement_pipeline():
-    print("=" * 70)
-    print("   ABLETON LIVE 12 - AUTONOMOUS AI ARRANGEMENT & DSP ENGINE")
-    print("=" * 70)
+def read_tracks(client):
+    response = client.send("get_arrangement_info")
+    result = response.get("result")
+
+    if not isinstance(result, dict):
+        raise RuntimeError(
+            "Unexpected get_arrangement_info response: "
+            f"{response!r}"
+        )
+
+    tracks = result.get("tracks")
+
+    if not isinstance(tracks, list):
+        raise RuntimeError(
+            "Bridge response has no tracks list: "
+            f"{response!r}"
+        )
+
+    return tracks
+
+
+def find_clip_index(client, track_index, position):
+    tracks = read_tracks(client)
+
+    if track_index >= len(tracks):
+        raise RuntimeError(
+            f"Track {track_index} disappeared during execution"
+        )
+
+    arrangement_clips = tracks[track_index].get(
+        "arrangement_clips"
+    )
+
+    if not isinstance(arrangement_clips, list):
+        raise RuntimeError(
+            f"Cannot inspect clips on track {track_index}"
+        )
+
+    matches = []
+
+    for index, clip in enumerate(arrangement_clips):
+        try:
+            start_time = float(clip["start_time"])
+        except (KeyError, TypeError, ValueError):
+            continue
+
+        if abs(start_time - position) < 0.01:
+            matches.append(index)
+
+    if len(matches) != 1:
+        raise RuntimeError(
+            "Cannot uniquely identify newly created clip "
+            f"on track {track_index} at beat {position}. "
+            "Stopped to avoid writing into the wrong clip."
+        )
+
+    return matches[0]
+
+
+def apply_plan(plan, host, port):
+    client = AbletonClient(host, port)
 
     try:
-        client = AbletonClient()
-        print("✓ Connected to Ableton Live 12 MCP bridge on localhost:9877")
-    except Exception as e:
-        print(f"✗ Connection error: {e}")
-        print("Ensure Ableton Live 12 is running with the Python MCP Remote Script enabled.")
-        sys.exit(1)
+        tracks = read_tracks(client)
 
-    # 1. Global Transport & View Configuration
-    print("\n[1/5] Configuring Transport & Arranger View...")
-    client.send('set_tempo', {'tempo': 150.0})
-    client.send('set_arrangement_loop', {'loop_start': 0.0, 'loop_length': 320.0, 'enabled': True})
-    client.send('set_song_time', {'time': 0.0})
-    client.send('set_view', {'view_name': 'Arranger'})
+        # Strict preflight: never delete or overwrite existing material.
+        for index in sorted(set(plan["tracks"].values())):
+            if index >= len(tracks):
+                raise RuntimeError(
+                    f"Required track index {index} does not exist"
+                )
 
-    # 2. Reset Arrangement Canvas
-    print("[2/5] Resetting arrangement clips across tracks...")
-    info = client.send('get_arrangement_info')
-    tracks = info.get('result', {}).get('tracks', [])
-    for t_idx, trk in enumerate(tracks):
-        clips = trk.get('arrangement_clips', [])
-        for i in range(len(clips) - 1, -1, -1):
-            client.send('delete_arrangement_clip', {'track_index': t_idx, 'clip_index': i})
+            clips = tracks[index].get("arrangement_clips")
 
-    # 3. Dynamic Device DSP Parameter Configuration
-    print("[3/5] Applying DSP chains & parameter automation...")
-    # Sub Bass Track (Track 2): Drum Buss & Saturator
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Compressor On', 'value': 1.0})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Drive', 'value': 0.60})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Crunch', 'value': 0.45})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Boom Amt', 'value': 0.70})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Boom Freq', 'value': 0.35})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Transients', 'value': 0.60})
-    client.send('set_device_parameter', {'track_index': 2, 'device_index': 2, 'parameter_name': 'Drive', 'value': 0.65})
+            if not isinstance(clips, list):
+                raise RuntimeError(
+                    f"Cannot verify that track {index} is empty"
+                )
 
-    # Kick Track (Track 3): Drum Buss
-    client.send('set_device_parameter', {'track_index': 3, 'device_index': 1, 'parameter_name': 'Drive', 'value': 0.45})
-    client.send('set_device_parameter', {'track_index': 3, 'device_index': 1, 'parameter_name': 'Transients', 'value': 0.70})
+            if clips:
+                raise RuntimeError(
+                    f"Track {index} contains arrangement clips. "
+                    "Use an empty project template. "
+                    "No existing clips were deleted."
+                )
 
-    # Snare Track (Track 4): Drum Buss
-    client.send('set_device_parameter', {'track_index': 4, 'device_index': 2, 'parameter_name': 'Drive', 'value': 0.40})
-    client.send('set_device_parameter', {'track_index': 4, 'device_index': 2, 'parameter_name': 'Crunch', 'value': 0.35})
+        client.send("set_tempo", {"tempo": plan["bpm"]})
 
-    # 4. Clip Creation Helpers
-    def add_midi_clip(track_idx, pos, length, notes, name=""):
-        client.send('create_arrangement_clip', {'track_index': track_idx, 'position': pos, 'length': length})
-        arr_info = client.send('get_arrangement_info')
-        arr_clips = arr_info['result']['tracks'][track_idx]['arrangement_clips']
-        target_idx = None
-        for i, c in enumerate(arr_clips):
-            if abs(c['start_time'] - pos) < 0.05:
-                target_idx = i
-                break
-        if target_idx is not None:
-            client.send('add_notes_to_arrangement_clip', {
-                'track_index': track_idx,
-                'clip_index': target_idx,
-                'notes': notes
-            })
-            if name:
-                client.send('set_arrangement_clip_property', {
-                    'track_index': track_idx,
-                    'clip_index': target_idx,
-                    'property': 'name',
-                    'value': name
-                })
+        for number, clip in enumerate(plan["clips"], start=1):
+            track_index = clip["track_index"]
 
-    def add_audio_clips(track_idx, positions):
-        if not os.path.exists(SAMPLE_PATH):
-            return
-        for pos in positions:
-            client.send('create_arrangement_audio_clip', {
-                'track_index': track_idx,
-                'position': pos,
-                'file_path': SAMPLE_PATH
+            client.send("create_arrangement_clip", {
+                "track_index": track_index,
+                "position": clip["position"],
+                "length": clip["length"],
             })
 
-    # ========================================================
-    # PROCEDURAL MIDI GENERATORS
-    # ========================================================
-    def generate_sub_bass(loops=1):
-        # 16-beat progression with pitch glides
-        sub_pattern = [
-            (0.0, 2.5, 45, 127),
-            (2.75, 0.75, 45, 120),
-            (3.5, 0.5, 57, 115),
-            (4.0, 2.0, 41, 127),
-            (6.5, 0.75, 41, 120),
-            (7.25, 0.75, 53, 115),
-            (8.0, 2.25, 36, 127),
-            (10.5, 1.0, 36, 120),
-            (11.5, 0.5, 48, 110),
-            (12.0, 1.75, 43, 127),
-            (14.0, 1.0, 40, 125),
-            (15.25, 0.75, 45, 120)
-        ]
-        notes = []
-        for l in range(loops):
-            offset = l * 16.0
-            for start, dur, p, vel in sub_pattern:
-                notes.append({'pitch': p, 'start_time': offset + start, 'duration': dur, 'velocity': vel})
-        return notes
+            clip_index = find_clip_index(
+                client,
+                track_index,
+                clip["position"],
+            )
 
-    def generate_kick(loops=1):
-        hits = [0.0, 2.75, 4.0, 6.5, 8.0, 10.5, 12.0, 14.0]
-        notes = []
-        for l in range(loops):
-            offset = l * 16.0
-            for h in hits:
-                notes.append({'pitch': 36, 'start_time': offset + h, 'duration': 0.35, 'velocity': 127})
-        return notes
+            client.send("add_notes_to_arrangement_clip", {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "notes": clip["notes"],
+            })
 
-    def generate_snare(loops=1):
-        notes = []
-        for l in range(loops):
-            offset = l * 16.0
-            for b in [2.0, 6.0, 10.0, 14.0]:
-                notes.append({'pitch': 38, 'start_time': offset + b, 'duration': 0.5, 'velocity': 127})
-            notes.append({'pitch': 38, 'start_time': offset + 7.5, 'duration': 0.2, 'velocity': 105})
-            for r in range(4):
-                notes.append({'pitch': 38, 'start_time': offset + 15.0 + (r * 0.25), 'duration': 0.15, 'velocity': 85 + (r * 10)})
-        return notes
+            client.send("set_arrangement_clip_property", {
+                "track_index": track_index,
+                "clip_index": clip_index,
+                "property": "name",
+                "value": clip["name"],
+            })
 
-    def generate_hihats(loops=1):
-        notes = []
-        for l in range(loops):
-            offset = l * 16.0
-            for step in range(32):
-                t = step * 0.5
-                if (6.5 <= t < 8.0) or (14.5 <= t < 16.0):
-                    continue
-                vel = 112 if step % 2 == 0 else 90
-                notes.append({'pitch': 42, 'start_time': offset + t, 'duration': 0.2, 'velocity': vel})
-            for r in range(6):
-                notes.append({'pitch': 42, 'start_time': offset + 6.5 + (r * 0.25), 'duration': 0.12, 'velocity': 85 + (r * 7)})
-            for r in range(12):
-                notes.append({'pitch': 42, 'start_time': offset + 14.5 + (r * 0.125), 'duration': 0.08, 'velocity': 75 + (r * 4)})
-        return notes
+            print(
+                f"[{number}/{len(plan['clips'])}] "
+                f"{clip['name']}"
+            )
 
-    # 5. Programmatic Timeline Construction (80 Bars / 320 Beats)
-    print("[4/5] Constructing Arrangement Structure across 80 bars...")
-    # Audio Track (Track 8)
-    add_audio_clips(8, [i * 16.0 for i in range(20)])
+        client.send("set_song_time", {"time": 0.0})
+        print("Done. Check the arrangement in Ableton.")
 
-    # Drop 1: Bars 9-24 (32.0 -> 96.0)
-    add_midi_clip(2, 32.0, 64.0, generate_sub_bass(4), "Drop 1 Sub Bass")
-    add_midi_clip(3, 32.0, 64.0, generate_kick(4), "Drop 1 Kick")
-    add_midi_clip(4, 32.0, 64.0, generate_snare(4), "Drop 1 Snare")
-    add_midi_clip(5, 32.0, 64.0, generate_hihats(4), "Drop 1 HiHats")
-
-    # Buildup: Bars 33-40 (128.0 -> 160.0)
-    add_midi_clip(4, 144.0, 16.0, generate_snare(1), "Buildup Snare Roll")
-    add_midi_clip(5, 128.0, 32.0, generate_hihats(2), "Buildup HiHats")
-
-    # Main Drop 2: Bars 41-56 (160.0 -> 224.0)
-    add_midi_clip(2, 160.0, 64.0, generate_sub_bass(4), "Drop 2 Sub Bass")
-    add_midi_clip(3, 160.0, 64.0, generate_kick(4), "Drop 2 Kick")
-    add_midi_clip(4, 160.0, 64.0, generate_snare(4), "Drop 2 Snare")
-    add_midi_clip(5, 160.0, 64.0, generate_hihats(4), "Drop 2 HiHats")
-
-    # Climax Drop 3: Bars 57-72 (224.0 -> 288.0)
-    add_midi_clip(2, 224.0, 64.0, generate_sub_bass(4), "Climax Sub Bass")
-    add_midi_clip(3, 224.0, 64.0, generate_kick(4), "Climax Kick")
-    add_midi_clip(4, 224.0, 64.0, generate_snare(4), "Climax Snare")
-    add_midi_clip(5, 224.0, 64.0, generate_hihats(4), "Climax HiHats")
-
-    # 6. Rewind & Finalize
-    print("[5/5] Finalizing transport state (Rewind 0.0)...")
-    client.send('set_song_time', {'time': 0.0})
-    client.close()
-
-    print("\n" + "=" * 70)
-    print("   ARRANGEMENT COMPLETE: Ready for instant playback in Ableton Live 12!")
-    print("=" * 70)
+    finally:
+        client.close()
 
 
-if __name__ == '__main__':
-    run_arrangement_pipeline()
+def run_self_test():
+    first = build_plan(seed=42)
+    second = build_plan(seed=42)
+
+    assert first == second, "Same seed must reproduce the same plan"
+    assert first["bars"] == TOTAL_BARS
+    assert first["clips"]
+
+    for clip in first["clips"]:
+        validate_clip(clip)
+
+    positions_by_track = {}
+
+    for clip in first["clips"]:
+        track = clip["track_index"]
+        start = clip["position"]
+        end = start + clip["length"]
+
+        positions_by_track.setdefault(track, []).append(
+            (start, end)
+        )
+
+    for track, intervals in positions_by_track.items():
+        intervals.sort()
+
+        for previous, current in zip(
+            intervals,
+            intervals[1:],
+        ):
+            assert previous[1] <= current[0], (
+                f"Overlapping clips on track {track}"
+            )
+
+    print("Self-test passed.")
+
+
+def main():
+    parser = argparse.ArgumentParser(
+        description="Generate and optionally apply an Ableton arrangement"
+    )
+
+    parser.add_argument(
+        "--apply",
+        action="store_true",
+        help="Send generated clips to Ableton",
+    )
+
+    parser.add_argument(
+        "--confirm-template",
+        action="store_true",
+        help="Confirm that an empty Ableton template is open",
+    )
+
+    parser.add_argument(
+        "--self-test",
+        action="store_true",
+    )
+
+    parser.add_argument(
+        "--seed",
+        type=int,
+        default=42,
+    )
+
+    parser.add_argument(
+        "--output",
+        default="arrangement_plan.json",
+    )
+
+    parser.add_argument(
+        "--host",
+        default="127.0.0.1",
+    )
+
+    parser.add_argument(
+        "--port",
+        type=int,
+        default=9877,
+    )
+
+    args = parser.parse_args()
+
+    if args.self_test:
+        run_self_test()
+        return
+
+    plan = build_plan(args.seed)
+
+    output_path = Path(args.output)
+    output_path.write_text(
+        json.dumps(
+            plan,
+            ensure_ascii=False,
+            indent=2,
+        ),
+        encoding="utf-8",
+    )
+
+    note_count = sum(
+        len(clip["notes"])
+        for clip in plan["clips"]
+    )
+
+    print(
+        f"Saved {output_path}: "
+        f"{plan['bars']} bars, "
+        f"{len(plan['clips'])} clips, "
+        f"{note_count} notes."
+    )
+
+    if not args.apply:
+        print(
+            "Offline mode: Ableton was not modified."
+        )
+        return
+
+    if not args.confirm_template:
+        parser.error(
+            "--apply requires --confirm-template"
+        )
+
+    apply_plan(
+        plan,
+        host=args.host,
+        port=args.port,
+    )
+
+
+if __name__ == "__main__":
+    main()
