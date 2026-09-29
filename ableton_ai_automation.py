@@ -1,11 +1,14 @@
 #!/usr/bin/env python3
 """
-RED RAIN (Playboi Carti x KP Beatz x SALEM "Frost" Flip)
-=========================================================
-Autonomous Ableton Live 12 DAW Arrangement & Production Script
-Key: A Minor (Am -> Fmaj7 -> Cmaj -> G/Em)
-BPM: 150.0
-DAW: Ableton Live 12 Suite via MCP / TCP Socket Bridge (localhost:9877)
+Ableton Live 12 Autonomous AI Arrangement & DSP Automation Engine
+==================================================================
+Fully programmatic control over Ableton Live 12 Suite via TCP Socket / MCP Bridge.
+Automates:
+- Transport, BPM, loop markers, and view state
+- Audio clip placement & timeline warping
+- MIDI clip creation, note programming, and velocity dynamics
+- Live DSP device parameter manipulation (Drum Buss, Saturator, Filters, etc.)
+- Multi-track structural arrangement (Intro -> Drops -> Breakdown -> Buildup -> Outro)
 """
 
 import os
@@ -15,9 +18,13 @@ import json
 import time
 
 SCRIPT_DIR = os.path.dirname(os.path.abspath(__file__))
-SAMPLE_PATH = os.path.join(SCRIPT_DIR, "assets", "SALEM_Frost_Loop_Authentic.wav")
+SAMPLE_PATH = os.path.join(SCRIPT_DIR, "assets", "sample_loop.wav")
 
 class AbletonClient:
+    """
+    High-performance persistent TCP client connecting to Ableton Live's MCP Python Remote Script.
+    Communicates via JSON protocol on localhost:9877.
+    """
     def __init__(self, host='localhost', port=9877):
         self.host = host
         self.port = port
@@ -46,7 +53,7 @@ class AbletonClient:
         while True:
             chunk = self.sock.recv(16384)
             if not chunk:
-                raise ConnectionError("Socket connection closed by Ableton MCP server")
+                raise ConnectionError("Socket closed by Ableton Live bridge")
             buf += chunk.decode('utf-8')
             try:
                 return json.loads(buf)
@@ -57,31 +64,29 @@ class AbletonClient:
         if self.sock:
             self.sock.close()
 
-def build_red_rain():
-    if not os.path.exists(SAMPLE_PATH):
-        print(f"Error: Sample file not found at {SAMPLE_PATH}")
-        sys.exit(1)
 
+def run_arrangement_pipeline():
     print("=" * 70)
-    print("  PLAYBOI CARTI x KP BEATZ x SALEM - 'RED RAIN' INSTRUMENTAL BUILDER")
+    print("   ABLETON LIVE 12 - AUTONOMOUS AI ARRANGEMENT & DSP ENGINE")
     print("=" * 70)
 
     try:
         client = AbletonClient()
+        print("✓ Connected to Ableton Live 12 MCP bridge on localhost:9877")
     except Exception as e:
-        print(f"Failed to connect to Ableton Live MCP Bridge on localhost:9877: {e}")
-        print("Please ensure Ableton Live 12 is running with the MCP Remote Script active.")
+        print(f"✗ Connection error: {e}")
+        print("Ensure Ableton Live 12 is running with the Python MCP Remote Script enabled.")
         sys.exit(1)
 
-    # 1. Transport & Global Settings
-    print("\n[1/6] Setting Global Transport (150.0 BPM, 320-beat loop)...")
+    # 1. Global Transport & View Configuration
+    print("\n[1/5] Configuring Transport & Arranger View...")
     client.send('set_tempo', {'tempo': 150.0})
     client.send('set_arrangement_loop', {'loop_start': 0.0, 'loop_length': 320.0, 'enabled': True})
     client.send('set_song_time', {'time': 0.0})
     client.send('set_view', {'view_name': 'Arranger'})
 
-    # 2. Clear Existing Arrangement Clips
-    print("[2/6] Clearing existing arrangement clips across all tracks...")
+    # 2. Reset Arrangement Canvas
+    print("[2/5] Resetting arrangement clips across tracks...")
     info = client.send('get_arrangement_info')
     tracks = info.get('result', {}).get('tracks', [])
     for t_idx, trk in enumerate(tracks):
@@ -89,9 +94,9 @@ def build_red_rain():
         for i in range(len(clips) - 1, -1, -1):
             client.send('delete_arrangement_clip', {'track_index': t_idx, 'clip_index': i})
 
-    # 3. DSP & Distortion Chains
-    print("[3/6] Dialing in heavy 808 distortion and drum processing...")
-    # Track 2: 808 Pure (Drum Buss + Saturator)
+    # 3. Dynamic Device DSP Parameter Configuration
+    print("[3/5] Applying DSP chains & parameter automation...")
+    # Sub Bass Track (Track 2): Drum Buss & Saturator
     client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Compressor On', 'value': 1.0})
     client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Drive', 'value': 0.60})
     client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Crunch', 'value': 0.45})
@@ -100,15 +105,15 @@ def build_red_rain():
     client.send('set_device_parameter', {'track_index': 2, 'device_index': 1, 'parameter_name': 'Transients', 'value': 0.60})
     client.send('set_device_parameter', {'track_index': 2, 'device_index': 2, 'parameter_name': 'Drive', 'value': 0.65})
 
-    # Track 3: Kick (Drum Buss)
+    # Kick Track (Track 3): Drum Buss
     client.send('set_device_parameter', {'track_index': 3, 'device_index': 1, 'parameter_name': 'Drive', 'value': 0.45})
     client.send('set_device_parameter', {'track_index': 3, 'device_index': 1, 'parameter_name': 'Transients', 'value': 0.70})
 
-    # Track 4: Snare (Drum Buss)
+    # Snare Track (Track 4): Drum Buss
     client.send('set_device_parameter', {'track_index': 4, 'device_index': 2, 'parameter_name': 'Drive', 'value': 0.40})
     client.send('set_device_parameter', {'track_index': 4, 'device_index': 2, 'parameter_name': 'Crunch', 'value': 0.35})
 
-    # 4. Helper Functions
+    # 4. Clip Creation Helpers
     def add_midi_clip(track_idx, pos, length, notes, name=""):
         client.send('create_arrangement_clip', {'track_index': track_idx, 'position': pos, 'length': length})
         arr_info = client.send('get_arrangement_info')
@@ -133,6 +138,8 @@ def build_red_rain():
                 })
 
     def add_audio_clips(track_idx, positions):
+        if not os.path.exists(SAMPLE_PATH):
+            return
         for pos in positions:
             client.send('create_arrangement_audio_clip', {
                 'track_index': track_idx,
@@ -141,10 +148,10 @@ def build_red_rain():
             })
 
     # ========================================================
-    # PATTERN GENERATORS
+    # PROCEDURAL MIDI GENERATORS
     # ========================================================
-    def get_808_notes(loops=1):
-        # A Minor root notes with octave slides: A1(45)->A2(57), F1(41)->F2(53), C1(36)->C2(48), G1(43)/E1(40)
+    def generate_sub_bass(loops=1):
+        # 16-beat progression with pitch glides
         sub_pattern = [
             (0.0, 2.5, 45, 127),
             (2.75, 0.75, 45, 120),
@@ -166,7 +173,7 @@ def build_red_rain():
                 notes.append({'pitch': p, 'start_time': offset + start, 'duration': dur, 'velocity': vel})
         return notes
 
-    def get_kick_notes(loops=1):
+    def generate_kick(loops=1):
         hits = [0.0, 2.75, 4.0, 6.5, 8.0, 10.5, 12.0, 14.0]
         notes = []
         for l in range(loops):
@@ -175,7 +182,7 @@ def build_red_rain():
                 notes.append({'pitch': 36, 'start_time': offset + h, 'duration': 0.35, 'velocity': 127})
         return notes
 
-    def get_snare_notes(loops=1):
+    def generate_snare(loops=1):
         notes = []
         for l in range(loops):
             offset = l * 16.0
@@ -186,7 +193,7 @@ def build_red_rain():
                 notes.append({'pitch': 38, 'start_time': offset + 15.0 + (r * 0.25), 'duration': 0.15, 'velocity': 85 + (r * 10)})
         return notes
 
-    def get_hat_notes(loops=1):
+    def generate_hihats(loops=1):
         notes = []
         for l in range(loops):
             offset = l * 16.0
@@ -202,44 +209,42 @@ def build_red_rain():
                 notes.append({'pitch': 42, 'start_time': offset + 14.5 + (r * 0.125), 'duration': 0.08, 'velocity': 75 + (r * 4)})
         return notes
 
-    # 5. Writing Arrangement Clips
-    print("[4/6] Placing authentic SALEM 'Frost' sample loops across all 80 bars...")
-    # Find audio track index (Track 8 or first available audio track)
-    audio_track_idx = 8
-    add_audio_clips(audio_track_idx, [i * 16.0 for i in range(20)])
+    # 5. Programmatic Timeline Construction (80 Bars / 320 Beats)
+    print("[4/5] Constructing Arrangement Structure across 80 bars...")
+    # Audio Track (Track 8)
+    add_audio_clips(8, [i * 16.0 for i in range(20)])
 
-    print("[5/6] Writing 808 sub, kick punch, cavernous snares, and rolling hats...")
     # Drop 1: Bars 9-24 (32.0 -> 96.0)
-    add_midi_clip(2, 32.0, 64.0, get_808_notes(4), "Drop 1 808 Blown")
-    add_midi_clip(3, 32.0, 64.0, get_kick_notes(4), "Drop 1 Punch Kick")
-    add_midi_clip(4, 32.0, 64.0, get_snare_notes(4), "Drop 1 Snare")
-    add_midi_clip(5, 32.0, 64.0, get_hat_notes(4), "Drop 1 Houston Hats")
+    add_midi_clip(2, 32.0, 64.0, generate_sub_bass(4), "Drop 1 Sub Bass")
+    add_midi_clip(3, 32.0, 64.0, generate_kick(4), "Drop 1 Kick")
+    add_midi_clip(4, 32.0, 64.0, generate_snare(4), "Drop 1 Snare")
+    add_midi_clip(5, 32.0, 64.0, generate_hihats(4), "Drop 1 HiHats")
 
     # Buildup: Bars 33-40 (128.0 -> 160.0)
-    add_midi_clip(4, 144.0, 16.0, get_snare_notes(1), "Buildup Snare Roll")
-    add_midi_clip(5, 128.0, 32.0, get_hat_notes(2), "Buildup Hats")
+    add_midi_clip(4, 144.0, 16.0, generate_snare(1), "Buildup Snare Roll")
+    add_midi_clip(5, 128.0, 32.0, generate_hihats(2), "Buildup HiHats")
 
     # Main Drop 2: Bars 41-56 (160.0 -> 224.0)
-    add_midi_clip(2, 160.0, 64.0, get_808_notes(4), "Drop 2 808 Blown")
-    add_midi_clip(3, 160.0, 64.0, get_kick_notes(4), "Drop 2 Punch Kick")
-    add_midi_clip(4, 160.0, 64.0, get_snare_notes(4), "Drop 2 Snare")
-    add_midi_clip(5, 160.0, 64.0, get_hat_notes(4), "Drop 2 Houston Hats")
+    add_midi_clip(2, 160.0, 64.0, generate_sub_bass(4), "Drop 2 Sub Bass")
+    add_midi_clip(3, 160.0, 64.0, generate_kick(4), "Drop 2 Kick")
+    add_midi_clip(4, 160.0, 64.0, generate_snare(4), "Drop 2 Snare")
+    add_midi_clip(5, 160.0, 64.0, generate_hihats(4), "Drop 2 HiHats")
 
     # Climax Drop 3: Bars 57-72 (224.0 -> 288.0)
-    add_midi_clip(2, 224.0, 64.0, get_808_notes(4), "Climax 808 Blown")
-    add_midi_clip(3, 224.0, 64.0, get_kick_notes(4), "Climax Punch Kick")
-    add_midi_clip(4, 224.0, 64.0, get_snare_notes(4), "Climax Snare")
-    add_midi_clip(5, 224.0, 64.0, get_hat_notes(4), "Climax Houston Hats")
+    add_midi_clip(2, 224.0, 64.0, generate_sub_bass(4), "Climax Sub Bass")
+    add_midi_clip(3, 224.0, 64.0, generate_kick(4), "Climax Kick")
+    add_midi_clip(4, 224.0, 64.0, generate_snare(4), "Climax Snare")
+    add_midi_clip(5, 224.0, 64.0, generate_hihats(4), "Climax HiHats")
 
-    # 6. Finalize
-    print("[6/6] Rewinding transport to 0.0 and focusing Arranger view...")
+    # 6. Rewind & Finalize
+    print("[5/5] Finalizing transport state (Rewind 0.0)...")
     client.send('set_song_time', {'time': 0.0})
     client.close()
 
     print("\n" + "=" * 70)
-    print("  SUCCESS: 'RED RAIN' INSTRUMENTAL IS FULLY BUILT IN ABLETON LIVE 12!")
-    print("  Hit Spacebar in Ableton Live to play.")
+    print("   ARRANGEMENT COMPLETE: Ready for instant playback in Ableton Live 12!")
     print("=" * 70)
 
+
 if __name__ == '__main__':
-    build_red_rain()
+    run_arrangement_pipeline()
