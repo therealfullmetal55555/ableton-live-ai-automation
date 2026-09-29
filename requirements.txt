@@ -1,0 +1,2 @@
+# Core dependencies
+# The script uses python standard library (socket, json, os, sys, time)
